@@ -12,7 +12,7 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-This document is generated via R Markdown. Please feel free to view the corresponding GitHub repository: https://github.com/bsmity13/log_rss/.
+This document is generated via R Markdown. Please feel free to view the corresponding GitHub repository: https://github.com/bsmity13/log_rss/. 
 
 # Background
 
