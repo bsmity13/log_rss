@@ -1,0 +1,604 @@
+---
+title: "A General Method to Calculate log-RSS"
+author: "Brian J. Smith"
+date: "2020-02-11, last update 2020-04-27"
+output:  
+  html_document:
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Background
+
+Relative Selection Strength (RSS) allows for standardized comparison of effect sizes for exponential habitat selection analyses. This idea is presented in detail in Avgar et al. (2017), along with several specific cases where a simplified expression for log-RSS is presented.
+
+Here, I show that log-RSS can be calculated using the `predict()` function for any arbitrarily complex model and user-specified combinations of $x_1$ and $x_2$.
+
+# Proof of `predict()` Method
+
+Currently, the method for calculating log-RSS is case-specific, and the code has to be tweaked to accomodate each one. If instead, we could leverage the R's generic `predict()` function, which has methods for many different classes of models, then we could generalize our code for any case.
+
+Here, I assume we used a binomial GLM to fit the exponential habitat selection function, thus we will focus on `predict.glm()` here. The same principles apply if we fit a mixed model (*e.g.*, using `lme4::glmer()`) or a step-selection function (*e.g.*, using `survival::clogit()`).
+
+The function `predict.glm()` has argument `type`, which specifies whether the prediction should be returned on the link scale or the response scale. In the case of a binomial GLM, the choice `"link"` will simply return a linear combination of the coefficients and covariates, whereas the choice `"response"` would apply the inverse logit transformation (*i.e.*, `plogis()`), implying we fit a logistic habitat selection function, which is incorrect. Instead, what we want is the exponential habitat selection function without the intercept ($\beta_0$):
+
+$$Pr(use) \propto w(x) = exp\left(\sum_{i=1}^k \beta_i h_i(x)\right)$$
+
+In the above notation, our habitat selection function has $k$ habitat covariates and $i \in \{1, ... , k\}$ indexes each one of them. What `predict.glm(..., type = "link", ...)` gives us is simply:
+
+$$y(x) = \beta_0 + \sum_{i=1}^k \beta_i h_i(x)$$
+
+From this, it should be clear that to get $w(x)$ from $y(x)$, we just need to subtract the intercept and then apply the exponential function:
+
+$$w(x) = exp(y(x) - \beta_0)$$
+
+The RSS for $x_1$ vs $x_2$ is simply $RSS(x_1, x_2) = w(x_1)/w(x_2)$. And the log-RSS is then just:
+
+$$ln(RSS(x_1, x_2)) = ln\left(\frac{w(x_1)}{w(x_2)}\right) = ln(w(x_1)) - ln(w(x_2))$$
+
+From above, we can see that:
+
+$$ln(w(x_1)) - ln(w(x_2)) = ln(exp(y(x_1) - \beta_0)) - ln(exp(y(x_2) - \beta_0))$$
+$$ = (y(x_1) - \beta_0) - (y(x_2) - \beta_0)$$
+$$ = y(x_1) - y(x_2)$$
+
+So it is clear from this that to calculate log-RSS for any fitted binomial GLM, all we need is to use `predict.glm(..., type = "link", ...)` for $x_1$ and $x_2$ and subtract the results. Let's try the cases presented in Avgar et al. (2017) and see how it compares to the formulas.
+
+
+# Method Comparison
+
+I will use the `goats` data set from the package `ResourceSelection` for this example. See `?ResourceSelection::goats` for details.
+
+```{r example_setup}
+suppressWarnings({
+  suppressPackageStartupMessages({
+    library(amt)
+    library(dplyr)
+    library(ggplot2)
+  })
+})
+
+#Load data
+data(goats, package = "ResourceSelection")
+#Change any SLOPE == 0 to 0.1
+goats$SLOPE[which(goats$SLOPE == 0)] <- 0.1
+#Transform covariates
+goats$ELEVATION_sc <- (goats$ELEVATION - mean(goats$ELEVATION))/sd(goats$ELEVATION)
+goats$SLOPE_sc <-  (goats$SLOPE - mean(goats$SLOPE))/sd(goats$SLOPE)
+goats$ELEVATION_log <- log(goats$ELEVATION)
+goats$SLOPE_log <- log(goats$SLOPE)
+
+#Visualize two covariates we'll use
+hist(goats$SLOPE)
+hist(goats$ELEVATION)
+```
+
+
+I'll fit seven models, corresponding to the seven common RSS expressions given in **Section 3** of Avgar et al. (2017). Following those equations, we will calculate log-RSS. We'll define $h_i(x)$ to be the elevation at location $x$ and the $h_j(x)$ to be the slope at location $x$. For all comparisons, we'll define $x_2$ as a location with mean elevation and mean slope.
+
+Note that for cases 2, 4, and 6, Avgar et al. (2017) assumed that $h_j(x_1) = h_j(x_2)$, which allows further simplification of the log-RSS expression. For these cases, I present an expression that relaxes those assumptions. See section below, "log-RSS Expression Derivation", for the proofs of all expressions.
+
+  1.  `m1` -- an additive combination of elevation and slope
+  2.  `m2` -- interaction between elevation and slope
+  3.  `m3` -- quadratic term for elevation plus slope
+  4.  `m4` -- quadratic term for elevation, plus interaction between slope and linear elevation term
+  5.  `m5` -- log-transformed elevation
+  6.  `m6` -- interaction between log-transformed elevation and slope
+  7.  `m7` -- an additive combination of log-transformed elevation and log-transformed slope
+
+```{r fit models}
+#Fit RSFs using amt wrapper
+m1 <- fit_rsf(goats, STATUS ~ ELEVATION_sc + SLOPE_sc)
+m2 <- fit_rsf(goats, STATUS ~ ELEVATION_sc * SLOPE_sc)
+m3 <- fit_rsf(goats, STATUS ~ ELEVATION_sc + I(ELEVATION_sc^2) + SLOPE_sc)
+m4 <- fit_rsf(goats, STATUS ~ ELEVATION_sc * SLOPE_sc + I(ELEVATION_sc^2))
+m5 <- fit_rsf(goats, STATUS ~ ELEVATION_log)
+m6 <- fit_rsf(goats, STATUS ~ ELEVATION_log * SLOPE_sc)
+m7 <- fit_rsf(goats, STATUS ~ ELEVATION_log + SLOPE_log)
+```
+
+Here, we'll setup $x_1$ and $x_2$ for all of the log-RSS calculations that follow.
+
+```{r logRSS x1 x2 setup}
+#Define x1
+x1 <- data.frame(ELEVATION = rep(seq(from = min(goats$ELEVATION), 
+                                     to = max(goats$ELEVATION), 
+                                     length.out = 100), 3),
+                 SLOPE = rep(quantile(goats$SLOPE, c(0.1, 0.5, 0.9)), each = 100)) %>% 
+  #Scale and center
+  mutate(ELEVATION_sc = (ELEVATION - mean(goats$ELEVATION))/sd(goats$ELEVATION),
+         SLOPE_sc = (SLOPE - mean(goats$SLOPE))/sd(goats$SLOPE)) %>% 
+  #Ln-transform
+  mutate(ELEVATION_log = log(ELEVATION),
+         SLOPE_log = log(SLOPE))
+
+#Define x2
+x2 <- data.frame(ELEVATION = mean(goats$ELEVATION), SLOPE = mean(goats$SLOPE)) %>% 
+  #Scale and center
+  mutate(ELEVATION_sc = (ELEVATION - mean(goats$ELEVATION))/sd(goats$ELEVATION),
+         SLOPE_sc = (SLOPE - mean(goats$SLOPE))/sd(goats$SLOPE)) %>% 
+  #Ln-transform
+  mutate(ELEVATION_log = log(ELEVATION),
+         SLOPE_log = log(SLOPE))
+```
+
+## Case 1
+
+```{r logRSS ex 1}
+#log-RSS under m1
+logRSS_m1 <- list(
+  delta_h_i = x1$ELEVATION_sc - x2$ELEVATION_sc,
+  delta_h_j = x1$SLOPE_sc - x2$SLOPE_sc,
+  beta_i = m1$model$coefficients["ELEVATION_sc"],
+  beta_j = m1$model$coefficients["SLOPE_sc"]
+)
+
+#Calculate using formula
+logRSS_m1$logRSS_1 <- logRSS_m1$beta_i * logRSS_m1$delta_h_i + logRSS_m1$beta_j * logRSS_m1$delta_h_j
+
+#Combine into data.frame
+logRSS_m1$df <- cbind(x1, logRSS_1 = logRSS_m1$logRSS_1)
+#Plot
+ggplot(logRSS_m1$df, aes(x = ELEVATION, y = logRSS_1, color = factor(SLOPE))) +
+  geom_line(size = 1) +
+  theme_bw()
+
+#Using predict()
+logRSS_m1$y_x1 <- predict(m1$model, newdata = x1)
+logRSS_m1$y_x2 <- predict(m1$model, newdata = x2)
+logRSS_m1$logRSS_2 <- unname(logRSS_m1$y_x1 - logRSS_m1$y_x2)
+
+#Compare (round to 10 decimal places for floating point error)
+round(logRSS_m1$logRSS_1, 10) - round(logRSS_m1$logRSS_2, 10)
+#For brevity, present the sum
+sum(round(logRSS_m1$logRSS_1, 10) - round(logRSS_m1$logRSS_2, 10))
+```
+
+
+## Case 2
+
+Note that Avgar et al. (2017) assumed $h_j(x_1) = h_j(x_2)$ in this example, which allowed further simplification of the expression for log-RSS. If we relax that assumption, we see that the equation for log-RSS is:
+
+$$ = \beta_i \Delta h_i + \beta_j \Delta h_j + \beta_{ij}[h_i(x_1)h_j(x_1) - h_i(x_2)h_j(x_2)]$$
+
+We can define $\Delta h_{ij} = [h_i(x_1)h_j(x_1) - h_i(x_2)h_j(x_2)]$, thereby simplifying to:
+
+$$ = \beta_i \Delta h_i + \beta_j \Delta h_j + \beta_{ij} \Delta h_{ij}$$
+
+```{r logRSS ex 2}
+#log-RSS under m2
+logRSS_m2 <- list(
+  delta_h_i = x1$ELEVATION_sc - x2$ELEVATION_sc,
+  delta_h_j = x1$SLOPE_sc - x2$SLOPE_sc,
+  delta_h_ij = x1$ELEVATION_sc * x1$SLOPE_sc - x2$ELEVATION_sc * x2$SLOPE_sc,
+  beta_i = m2$model$coefficients["ELEVATION_sc"],
+  beta_ij = m2$model$coefficients["ELEVATION_sc:SLOPE_sc"],
+  beta_j = m2$model$coefficients["SLOPE_sc"]
+)
+
+#Calculate using formula
+logRSS_m2$logRSS_1 <- logRSS_m2$beta_i * logRSS_m2$delta_h_i + logRSS_m2$beta_j * logRSS_m2$delta_h_j +logRSS_m2$beta_ij * logRSS_m2$delta_h_ij
+
+#Combine into data.frame
+logRSS_m2$df <- cbind(x1, logRSS_1 = logRSS_m2$logRSS_1)
+#Plot
+ggplot(logRSS_m2$df, aes(x = ELEVATION, y = logRSS_1, color = factor(SLOPE))) +
+  geom_line(size = 1) +
+  theme_bw()
+
+#Using predict()
+logRSS_m2$y_x1 <- predict(m2$model, newdata = x1)
+logRSS_m2$y_x2 <- predict(m2$model, newdata = x2)
+logRSS_m2$logRSS_2 <- unname(logRSS_m2$y_x1 - logRSS_m2$y_x2)
+
+#Compare (round to 10 decimal places for floating point error)
+sum(round(logRSS_m2$logRSS_1, 10) - round(logRSS_m2$logRSS_2, 10))
+
+```
+
+## Case 3
+
+```{r logRSS ex 3}
+#log-RSS under m3
+logRSS_m3 <- list(
+  delta_h_i = x1$ELEVATION_sc - x2$ELEVATION_sc,
+  delta_h_j = x1$SLOPE_sc - x2$SLOPE_sc,
+  h_i_x1 = x1$ELEVATION_sc,
+  beta_i = m3$model$coefficients["ELEVATION_sc"],
+  beta_i2 = m3$model$coefficients["I(ELEVATION_sc^2)"],
+  beta_j = m3$model$coefficients["SLOPE_sc"]
+)
+
+#Calculate using formula
+logRSS_m3$logRSS_1 <- logRSS_m3$delta_h_i * 
+  (logRSS_m3$beta_i + 
+     logRSS_m3$beta_i2 * 
+     (2 * logRSS_m3$h_i_x1 - logRSS_m3$delta_h_i)) +
+  logRSS_m3$beta_j * logRSS_m3$delta_h_j
+
+#Combine into data.frame
+logRSS_m3$df <- cbind(x1, logRSS_1 = logRSS_m3$logRSS_1)
+#Plot
+ggplot(logRSS_m3$df, aes(x = ELEVATION, y = logRSS_1, color = factor(SLOPE))) +
+  geom_line(size = 1) +
+  theme_bw()
+
+#Using predict()
+logRSS_m3$y_x1 <- predict(m3$model, newdata = x1)
+logRSS_m3$y_x2 <- predict(m3$model, newdata = x2)
+logRSS_m3$logRSS_2 <- unname(logRSS_m3$y_x1 - logRSS_m3$y_x2)
+
+#Compare (round to 10 decimal places for floating point error)
+sum(round(logRSS_m3$logRSS_1, 10) - round(logRSS_m3$logRSS_2, 10))
+```
+
+## Case 4  
+
+As with Case 2, Avgar et al. (2017) assumed that $h_j(x_1) = h_j(x_2)$ in this example, which allowed further simplification of the expression for log-RSS. If we relax that assumption, we see that the equation for log-RSS is:
+
+$$= \beta_i \Delta h_i + \beta_j \Delta h_j + \beta_{ij}\Delta h_{ij} + \beta_{i2}\Delta h_i[2 h_i(x_1) - \Delta h_i]$$
+
+```{r logRSS ex 4}
+#log-RSS under m4
+logRSS_m4 <- list(
+  delta_h_i = x1$ELEVATION_sc - x2$ELEVATION_sc,
+  delta_h_j = x1$SLOPE_sc - x2$SLOPE_sc,
+  delta_h_ij = x1$ELEVATION_sc * x1$SLOPE_sc - x2$ELEVATION_sc * x2$SLOPE_sc,
+  h_i_x1 = x1$ELEVATION_sc,
+  beta_i = m4$model$coefficients["ELEVATION_sc"],
+  beta_i2 = m4$model$coefficients["I(ELEVATION_sc^2)"],
+  beta_ij = m4$model$coefficients["ELEVATION_sc:SLOPE_sc"],
+  beta_j = m4$model$coefficients["SLOPE_sc"]
+)
+
+#Calculate using formula
+logRSS_m4$logRSS_1 <- logRSS_m4$beta_i * logRSS_m4$delta_h_i +
+  logRSS_m4$beta_j * logRSS_m4$delta_h_j +
+  logRSS_m4$beta_ij * logRSS_m4$delta_h_ij +
+  logRSS_m4$beta_i2 * logRSS_m4$delta_h_i * (2 * logRSS_m4$h_i_x1 - logRSS_m4$delta_h_i)
+
+#Combine into data.frame
+logRSS_m4$df <- cbind(x1, logRSS_1 = logRSS_m4$logRSS_1)
+#Plot
+ggplot(logRSS_m4$df, aes(x = ELEVATION, y = logRSS_1, color = factor(SLOPE))) +
+  geom_line(size = 1) +
+  theme_bw()
+
+#Using predict()
+logRSS_m4$y_x1 <- predict(m4$model, newdata = x1)
+logRSS_m4$y_x2 <- predict(m4$model, newdata = x2)
+logRSS_m4$logRSS_2 <- unname(logRSS_m4$y_x1 - logRSS_m4$y_x2)
+
+#Compare (round to 10 decimal places for floating point error)
+sum(round(logRSS_m4$logRSS_1, 10) - round(logRSS_m4$logRSS_2, 10))
+```
+
+## Case 5  
+
+```{r logRSS ex 5}
+#log-RSS under m5
+logRSS_m5 <- list(
+  delta_h_i = x1$ELEVATION - x2$ELEVATION,
+  h_i_x1 = x1$ELEVATION,
+  beta_i = m5$model$coefficients["ELEVATION_log"]
+)
+
+#Calculate using formula
+logRSS_m5$logRSS_1 <- log((logRSS_m5$h_i_x1/(logRSS_m5$h_i_x1 - logRSS_m5$delta_h_i))^logRSS_m5$beta_i)
+
+#Combine into data.frame
+logRSS_m5$df <- cbind(x1, logRSS_1 = logRSS_m5$logRSS_1)
+#Plot
+ggplot(logRSS_m5$df, aes(x = ELEVATION, y = logRSS_1)) +
+  geom_line(size = 1) +
+  theme_bw()
+
+#Using predict()
+logRSS_m5$y_x1 <- predict(m5$model, newdata = x1)
+logRSS_m5$y_x2 <- predict(m5$model, newdata = x2)
+logRSS_m5$logRSS_2 <- unname(logRSS_m5$y_x1 - logRSS_m5$y_x2)
+
+#Compare (round to 10 decimal places for floating point error)
+sum(round(logRSS_m5$logRSS_1, 10) - round(logRSS_m5$logRSS_2, 10))
+```
+
+## Case 6  
+
+As with Cases 2 and 4, Avgar et al. (2017) assumed $h_j(x_1) = h_j(x_2)$ in this example, which allowed further simplification of the expression for log-RSS. If we relax that assumption, we see that the equation for log-RSS is: 
+
+$$= ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_i}\right) + \beta_j \Delta h_j + ln\left(\frac{h_i(x_1)^{\beta_{ij} h_j(x_1)}}{h_i(x_2)^{\beta_{ij} h_j(x_2)}}\right)$$
+
+```{r logRSS ex 6}
+#log-RSS under m6
+logRSS_m6 <- list(
+  delta_h_j = x1$SLOPE_sc - x2$SLOPE_sc,
+  h_i_x1 = x1$ELEVATION,
+  h_j_x1 = x1$SLOPE_sc,
+  h_i_x2 = x2$ELEVATION,
+  h_j_x2 = x2$SLOPE_sc,
+  beta_i = m6$model$coefficients["ELEVATION_log"],
+  beta_ij = m6$model$coefficients["ELEVATION_log:SLOPE_sc"],
+  beta_j = m6$model$coefficients["SLOPE_sc"]
+)
+
+#Calculate using formula
+logRSS_m6$logRSS_1 <- log((logRSS_m6$h_i_x1/logRSS_m6$h_i_x2)^logRSS_m6$beta_i) +
+  logRSS_m6$beta_j * logRSS_m6$delta_h_j +
+  log((logRSS_m6$h_i_x1^(logRSS_m6$beta_ij * logRSS_m6$h_j_x1))/(logRSS_m6$h_i_x2^(logRSS_m6$beta_ij * logRSS_m6$h_j_x2)))
+
+#Combine into data.frame
+logRSS_m6$df <- cbind(x1, logRSS_1 = logRSS_m6$logRSS_1)
+#Plot
+ggplot(logRSS_m6$df, aes(x = ELEVATION, y = logRSS_1, color = factor(SLOPE))) +
+  geom_line(size = 1) +
+  theme_bw()
+
+#Using predict()
+logRSS_m6$y_x1 <- predict(m6$model, newdata = x1)
+logRSS_m6$y_x2 <- predict(m6$model, newdata = x2)
+logRSS_m6$logRSS_2 <- unname(logRSS_m6$y_x1 - logRSS_m6$y_x2)
+
+#Compare (round to 10 decimal places for floating point error)
+sum(round(logRSS_m6$logRSS_1, 10) - round(logRSS_m6$logRSS_2, 10))
+```
+
+## Case 7  
+
+```{r logRSS ex 7}
+#log-RSS under m7
+logRSS_m7 <- list(
+  delta_h_i = x1$ELEVATION - x2$ELEVATION,
+  delta_h_j = x1$SLOPE - x2$SLOPE,
+  h_i_x1 = x1$ELEVATION,
+  h_j_x1 = x1$SLOPE,
+  beta_i = m7$model$coefficients["ELEVATION_log"],
+  beta_j = m7$model$coefficients["SLOPE_log"]
+)
+
+#Calculate using formula
+logRSS_m7$logRSS_1 <- log((logRSS_m7$h_i_x1/(logRSS_m7$h_i_x1 - logRSS_m7$delta_h_i))^logRSS_m7$beta_i) +  log((logRSS_m7$h_j_x1/(logRSS_m7$h_j_x1 - logRSS_m7$delta_h_j))^logRSS_m7$beta_j)
+
+#Combine into data.frame
+logRSS_m7$df <- cbind(x1, logRSS_1 = logRSS_m7$logRSS_1)
+#Plot
+ggplot(logRSS_m7$df, aes(x = ELEVATION, y = logRSS_1, color = factor(SLOPE))) +
+  geom_line(size = 1) +
+  theme_bw()
+
+#Using predict()
+logRSS_m7$y_x1 <- predict(m7$model, newdata = x1)
+logRSS_m7$y_x2 <- predict(m7$model, newdata = x2)
+logRSS_m7$logRSS_2 <- unname(logRSS_m7$y_x1 - logRSS_m7$y_x2)
+
+#Compare (round to 10 decimal places for floating point error)
+sum(round(logRSS_m7$logRSS_1, 10) - round(logRSS_m7$logRSS_2, 10))
+```
+
+# A General Function
+
+The current version of `amt` on [CRAN] (https://cran.r-project.org/package=amt) (version 0.1.0 as of 2020-04-23) contains a general function, `log_rss()` that calculates log-RSS for a fitted RSF or (i)SSF. Install the latest version of `amt` with `install.packages("amt")` and see the help file with `?log_rss`.
+
+<hr>  
+
+# log-RSS Expression Derivation
+
+For some cases in **Section 3** of Avgar et al. (2017), they assumed that $h_j(x_1) = h_j(x_2)$, which allowed them to further simplify the expressions. Here, I wrote out the derivation for each of the formulas presented by Avgar et al. (2017), allowing me to also demonstrate the cases where $h_j(x_1) \neq h_j(x_2)$.  
+
+## Definitions
+
+Form of the exponential RSF/SSF:
+
+$$Pr(use) \propto w(x) = exp\left[\sum_{i=1}^k \beta_i h_i(x) \right]$$
+
+Relative selection strength:  
+
+$$RSS(x_1, x_2) = \frac{w(x_1)}{w(x_2)}$$
+
+Change in habitat between $x_1$ and $x_2$:  
+
+$$\Delta h_i = h_i(x_1) - h_i(x_2)$$
+
+$$\therefore h_i(x_2) = h_i(x_1) - \Delta h_i$$
+
+## Case 1
+
+Additive combination of two variables
+
+R formula notation: `w ~ h_i + h_j`
+
+$$RSS(x_1, x_2) = \frac{w(x_1)}{w(x_2)} = \frac{exp[\beta_i h_i(x_1) + \beta_j h_j(x_1)]}{exp[\beta_i h_i(x_2) + \beta_j h_j(x_2)]}$$
+
+$$ln(RSS(x_1, x_2)) = ln\left(\frac{exp[\beta_i h_i(x_1) + \beta_j h_j(x_1)]}{exp[\beta_i h_i(x_2) + \beta_j h_j(x_2)]}\right)$$
+
+$$ = ln(exp[\beta_i h_i(x_1) + \beta_j h_j(x_1)]) - ln(exp[\beta_i h_i(x_2) + \beta_j h_j(x_2)])$$
+
+$$ = [\beta_i h_i(x_1) + \beta_j h_j(x_1)] - [\beta_i h_i(x_2) + \beta_j h_j(x_2)]$$
+
+$$ = \beta_i h_i(x_1) - \beta_i h_i(x_2) + \beta_j h_j(x_1) - \beta_j h_j(x_2)$$
+
+$$ = \beta_i [h_i(x_1) - h_i(x_2)] + \beta_j [h_j(x_1) - h_j(x_2)]$$
+
+$$ = \beta_i \Delta h_i + \beta_j \Delta h_j$$
+
+## Case 2
+
+Interaction of two variables
+
+R formula notation: `w ~ h_i * h_j`
+
+$$RSS(x_1, x_2) = \frac{w(x_1)}{w(x_2)} = \frac{exp[\beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1)]}{exp[\beta_i h_i(x_2) + \beta_j h_j(x_2) + \beta_{ij}h_i(x_2)h_j(x_2)]}$$
+
+$$ln(RSS(x_1, x_2)) = ln\left(\frac{exp[\beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1)]}{exp[\beta_i h_i(x_2) + \beta_j h_j(x_2) + \beta_{ij}h_i(x_2)h_j(x_2)]}\right)$$
+
+$$ = ln(exp[\beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1)]) - ln(exp[\beta_i h_i(x_2) + \beta_j h_j(x_2) + \beta_{ij}h_i(x_2)h_j(x_2)])$$
+
+$$ = [\beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1)] - [\beta_i h_i(x_2) + \beta_j h_j(x_2) + \beta_{ij}h_i(x_2)h_j(x_2)]$$
+
+$$ = \beta_i h_i(x_1) - \beta_i h_i(x_2) + \beta_j h_j(x_1) - \beta_j h_j(x_2) + \beta_{ij}h_i(x_1)h_j(x_1) - \beta_{ij}h_i(x_2)h_j(x_2)$$
+
+$$ = \beta_i [h_i(x_1) - h_i(x_2)] + \beta_j [h_j(x_1) - h_j(x_2)] + \beta_{ij}[h_i(x_1)h_j(x_1) - h_i(x_2)h_j(x_2)]$$
+
+$$ = \beta_i \Delta h_i + \beta_j \Delta h_j + \beta_{ij}[h_i(x_1)h_j(x_1) - h_i(x_2)h_j(x_2)]$$
+
+Here, Avgar et al. (2017) assumed that $h_j(x_1) = h_j(x_2)$, therefore:
+
+$$ = \beta_i \Delta h_i + 0 + \beta_{ij}h_j(x_1)[h_i(x_1) - h_i(x_2)]$$
+
+$$ = \beta_i \Delta h_i + \beta_{ij}h_j(x_1)\Delta h_i$$
+
+$$ = \Delta h_i[\beta_i  + \beta_{ij}h_j(x_1)]$$
+
+## Case 3
+
+Single variable with quadratic term
+
+R formula notation: `w ~ h_i + I(h_i^2)`
+
+$$RSS(x_1, x_2) = \frac{w(x_1)}{w(x_2)} = \frac{exp[\beta_i h_i(x_1) + \beta_{i2} [h_i(x_1)]^2]}{exp[\beta_i h_i(x_2) + \beta_{i2} [h_i(x_2)]^2]}$$
+
+$$ln(RSS(x_1, x_2)) = ln\left(\frac{exp[\beta_i h_i(x_1) + \beta_{i2} [h_i(x_1)]^2]}{exp[\beta_i h_i(x_2) + \beta_{i2} [h_i(x_2)]^2]}\right)$$
+
+$$ = ln(exp[\beta_i h_i(x_1) + \beta_{i2} [h_i(x_1)]^2]) - ln(exp[\beta_i h_i(x_2) + \beta_{i2} [h_i(x_2)]^2])$$
+
+$$ = [\beta_i h_i(x_1) + \beta_{i2} [h_i(x_1)]^2] - [\beta_i h_i(x_2) + \beta_{i2} [h_i(x_2)]^2]$$
+
+$$ = \beta_i h_i(x_1) - \beta_i h_i(x_2) + \beta_{i2} [h_i(x_1)]^2 - \beta_{i2} [h_i(x_2)]^2$$
+
+$$ = \beta_i [h_i(x_1) - h_i(x_2)] + \beta_{i2} \left([h_i(x_1)]^2 - [h_i(x_2)]^2\right)$$
+
+*Recall,* $a^2 - b^2 = (a + b)(a - b)$
+
+$$ = \beta_i \Delta h_i + \beta_{i2} \left([h_i(x_1) + h_i(x_2)][h_i(x_1) - h_i(x_2)]\right)$$
+
+$$ = \beta_i \Delta h_i + \beta_{i2} \left([h_i(x_1) + h_i(x_1) - \Delta h_i][\Delta h_i]\right)$$
+
+$$ =  \Delta h_i \left(\beta_i + \beta_{i2} [2 h_i(x_1) - \Delta h_i]\right)$$
+
+## Case 4
+
+Combination of Case 2 and Case 3 -- quadratic term and interaction
+
+R formula notation: `w ~ h_i * h_j + I(h_i^2)`
+
+$$RSS(x_1, x_2) = \frac{w(x_1)}{w(x_2)} = \frac{exp[\beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1) + \beta_{i2} [h_i(x_1)]^2]}{exp[\beta_i h_i(x_2) + \beta_j h_j(x_2) + \beta_{ij}h_i(x_2)h_j(x_2) + \beta_{i2} [h_i(x_2)]^2]}$$
+
+$$ln(RSS(x_1, x_2)) = ln\left(\frac{exp[\beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1) + \beta_{i2} [h_i(x_1)]^2]}{exp[\beta_i h_i(x_2) + \beta_j h_j(x_2) + \beta_{ij}h_i(x_2)h_j(x_2) + \beta_{i2} [h_i(x_2)]^2]}\right)$$
+
+$$= ln(exp[\beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1) + \beta_{i2} [h_i(x_1)]^2]) - ln(exp[\beta_i h_i(x_2) + \beta_j h_j(x_2) + \beta_{ij}h_i(x_2)h_j(x_2) + \beta_{i2} [h_i(x_2)]^2])$$
+
+$$= [\beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1) + \beta_{i2} [h_i(x_1)]^2] - [\beta_i h_i(x_2) + \beta_j h_j(x_2) + \beta_{ij}h_i(x_2)h_j(x_2) + \beta_{i2} [h_i(x_2)]^2]$$
+
+$$= \beta_i h_i(x_1) + \beta_j h_j(x_1) + \beta_{ij}h_i(x_1)h_j(x_1) + \beta_{i2} [h_i(x_1)]^2 - \beta_i h_i(x_2) - \beta_j h_j(x_2) - \beta_{ij}h_i(x_2)h_j(x_2) - \beta_{i2} [h_i(x_2)]^2$$
+
+$$= \beta_i h_i(x_1) - \beta_i h_i(x_2) + \beta_j h_j(x_1) - \beta_j h_j(x_2) + \beta_{ij}h_i(x_1)h_j(x_1) - \beta_{ij}h_i(x_2)h_j(x_2) + \beta_{i2} [h_i(x_1)]^2 - \beta_{i2} [h_i(x_2)]^2$$
+
+$$= \beta_i [h_i(x_1) - h_i(x_2)] + \beta_j [h_j(x_1) - h_j(x_2)] + \beta_{ij}[h_i(x_1)h_j(x_1) - h_i(x_2)h_j(x_2)] + \beta_{i2}[ [h_i(x_1)]^2 - [h_i(x_2)]^2]$$
+
+$$= \beta_i [\Delta h_i] + \beta_j [\Delta h_j] + \beta_{ij}[h_i(x_1)h_j(x_1) - h_i(x_2)h_j(x_2)] + \beta_{i2}\left[(h_i(x_1) + h_i(x_2))(h_i(x_1) - h_i(x_2))\right]$$
+
+$$= \beta_i [\Delta h_i] + \beta_j [\Delta h_j] + \beta_{ij}[h_i(x_1)h_j(x_1) - h_i(x_2)h_j(x_2)] + \beta_{i2}\left[((h_i(x_1) + h_i(x_1) - \Delta h_i)(\Delta h_i)\right]$$
+
+As with Case 2, Avgar et al. (2017) assumed that $h_2(x_1) = h_2(x_2)$, therefore:
+
+$$= \beta_i [\Delta h_i] + 0 + \beta_{ij}[h_i(x_1)h_j(x_1) - h_i(x_2)h_j(x_1)] + \beta_{i2}\left[((h_i(x_1) + h_i(x_1) - \Delta h_i)(\Delta h_i)\right]$$
+
+$$= \beta_i [\Delta h_i] + \beta_{ij}h_j(x_1)[h_i(x_1) - h_i(x_2)] + \beta_{i2}\left[((h_i(x_1) + h_i(x_1) - \Delta h_i)(\Delta h_i)\right]$$
+
+$$= \beta_i [\Delta h_i] + \beta_{ij}h_j(x_1)[\Delta h_i] + \beta_{i2}\left[((h_i(x_1) + h_i(x_1) - \Delta h_i)(\Delta h_i)\right]$$
+
+$$= \Delta h_i (\beta_i + \beta_{ij}h_j(x_1) + \beta_{i2}[2 h_i(x_1) - \Delta h_i])$$
+
+## Case 5
+
+Single ln-transformed variable
+
+R formula notation: `w ~ log(h_i)`
+
+$$RSS(x_1, x_2) = \frac{w(x_1)}{w(x_2)} = \frac{exp[\beta_i ln(h_i(x_1))]}{exp[\beta_i ln(h_i(x_2))]}$$
+
+$$ln\left[RSS(x_1, x_2)\right] = ln\left(\frac{exp[\beta_i ln(h_i(x_1))]}{exp[\beta_i ln(h_i(x_2))]}\right)$$
+
+$$= ln({exp[\beta_i ln(h_i(x_1))]}) - ln({exp[\beta_i ln(h_i(x_2))]})$$
+
+$$= \beta_i ln(h_i(x_1)) - \beta_i ln(h_i(x_2)) = \beta_i [ln(h_i(x_1)) - ln(h_i(x_2))]$$
+
+$$ = \beta_i ln\left[\frac{h_i(x_1)}{h_i(x_2)}\right] = ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_i}\right)$$
+
+*See **Definitions** for relationship between $h_i(x_2)$ and $\Delta h_i$*
+
+$$= ln\left(\left[\frac{h_i(x_1)}{h_i(x_1) - \Delta h_i}\right]^{\beta_i}\right)$$
+
+## Case 6
+
+Interaction with a ln-transformed variable and a second variable
+
+R formula notation: `w ~ log(h_i) * h_j`
+
+$$RSS(x_1, x_2) = \frac{w(x_1)}{w(x_2)} = \frac{exp[\beta_i ln(h_i(x_1)) + \beta_j h_j(x_1) + \beta_{ij} ln(h_i(x_1))h_j(x_1)]}{exp[\beta_i ln(h_i(x_2)) + \beta_j h_j(x_2) + \beta_{ij} ln(h_i(x_2))h_j(x_2)]}$$
+
+$$ln(RSS(x_1, x_2)) = ln\left(\frac{exp[\beta_i ln(h_i(x_1)) + \beta_j h_j(x_1) + \beta_{ij} ln(h_i(x_1))h_j(x_1)]}{exp[\beta_i ln(h_i(x_2)) + \beta_j h_j(x_2) + \beta_{ij} ln(h_i(x_2))h_j(x_2)]}\right)$$
+
+$$ = ln(exp[\beta_i ln(h_i(x_1)) + \beta_j h_j(x_1) + \beta_{ij} ln(h_i(x_1))h_j(x_1)]) - ln(exp[\beta_i ln(h_i(x_2)) + \beta_j h_j(x_2) + \beta_{ij} ln(h_i(x_2))h_j(x_2)])$$
+
+
+$$ = [\beta_i ln(h_i(x_1)) + \beta_j h_j(x_1) + \beta_{ij} ln(h_i(x_1))h_j(x_1)] - [\beta_i ln(h_i(x_2)) + \beta_j h_j(x_2) + \beta_{ij} ln(h_i(x_2))h_j(x_2)]$$
+
+$$= \beta_i \left[ln(h_i(x_1)) - ln(h_i(x_2))\right] + \beta_j \left[h_j(x_1) - h_j(x_2)\right] + \beta_{ij} \left[ln(h_i(x_1))h_j(x_1) - ln(h_i(x_2))h_j(x_2)\right]$$
+
+$$= \beta_i \left[ln(h_i(x_1)) - ln(h_i(x_2))\right] + \beta_j \left[h_j(x_1) - h_j(x_2)\right] +  \left[\beta_{ij}h_j(x_1)ln(h_i(x_1)) - \beta_{ij}h_j(x_2)ln(h_i(x_2))\right]$$
+
+$$= \beta_i \left[ln\left(\frac{h_i(x_1)}{h_i(x_2)}\right)\right] + \beta_j \left[\Delta h_j\right] + \left[ln(h_i(x_1)^{\beta_{ij}h_j(x_1)}) - ln(h_i(x_2)^{\beta_{ij}h_j(x_2)})\right]$$
+
+
+$$= \beta_i \left[ln\left(\frac{h_i(x_1)}{h_i(x_2)}\right)\right] + \beta_j \left[\Delta h_j\right] + \left[ln\left(\frac{h_i(x_1)^{\beta_{ij} h_j(x_1)}}{h_i(x_2)^{\beta_{ij} h_j(x_2)}}\right)\right]$$
+
+$$= ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_i}\right) + \beta_j \Delta h_j + \left[ln\left(\frac{h_i(x_1)^{\beta_{ij} h_j(x_1)}}{h_i(x_2)^{\beta_{ij} h_j(x_2)}}\right)\right]$$
+
+Here, Avgar et al. assumed $h_j(x_1) = h_j(x_2)$, which allows further simplification:
+
+$$= ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_i}\right) + 0 + ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_{ij} h_j(x_1)}\right)$$
+
+$$= ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_i}\right) + ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_{ij} h_j(x_1)}\right)$$
+
+$$= ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_i}\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_{ij} h_j(x_1)}\right)$$
+
+$$= ln\left(\left[\frac{h_i(x_1)}{h_i(x_2)}\right]^{\beta_i + \beta_{ij} h_j(x_1)}\right)$$
+
+$$= ln\left(\left[\frac{h_i(x_1)}{h_i(x_1) - \Delta h_i}\right]^{\beta_i + \beta_{ij} h_j(x_1)}\right)$$
+
+## Case 7  
+
+Sum of two ln-transformed variables
+
+R formula notation: `w ~ log(h_i) + log(h_j)`  
+
+$$RSS(x_1, x_2) = \frac{w(x_1)}{w(x_2)} = \frac{exp[\beta_i ln(h_i(x_1)) + \beta_j ln(h_j(x_1))]}{exp[\beta_i ln(h_i(x_2)) + \beta_j ln(h_j(x_2))]}$$
+
+$$ln(RSS(x_1, x_2)) = ln\left(\frac{exp[\beta_i ln(h_i(x_1)) + \beta_j ln(h_j(x_1))]}{exp[\beta_i ln(h_i(x_2)) + \beta_j ln(h_j(x_2))]}\right)$$
+
+$$ = ln(exp[\beta_i ln(h_i(x_1)) + \beta_j ln(h_j(x_1))]) - ln(exp[\beta_i ln(h_i(x_2)) + \beta_j ln(h_j(x_2))])$$
+
+$$ = [\beta_i ln(h_i(x_1)) + \beta_j ln(h_j(x_1))] - [\beta_i ln(h_i(x_2)) + \beta_j ln(h_j(x_2))]$$
+
+$$ = \beta_i ln(h_i(x_1)) + \beta_j ln(h_j(x_1)) - \beta_i ln(h_i(x_2)) - \beta_j ln(h_j(x_2))$$
+
+$$ = \beta_i ln(h_i(x_1)) - \beta_i ln(h_i(x_2)) + \beta_j ln(h_j(x_1)) - \beta_j ln(h_j(x_2))$$
+
+$$ = \beta_i [ln(h_i(x_1)) - ln(h_i(x_2))] + \beta_j [ln(h_j(x_1)) - ln(h_j(x_2))]$$
+
+$$ = \beta_i \left[ln\frac{h_i(x_1)}{h_i(x_2)}\right] + \beta_j \left[ln\frac{h_j(x_1)}{h_j(x_2)}\right]$$
+
+$$ = \beta_i \left[ln\frac{h_i(x_1)}{h_i(x_1) - \Delta h_i}\right] + \beta_j \left[ln\frac{h_j(x_1)}{h_j(x_1) - \Delta h_j}\right]$$
+
+$$ = ln\left(\left[\frac{h_i(x_1)}{h_i(x_1) - \Delta h_i}\right)^{\beta_i }\right] +  ln\left(\left[\frac{h_j(x_1)}{h_j(x_1) - \Delta h_j}^{\beta_j}\right)\right]$$
+
+
+<hr>  
+
+# References
+
+Avgar, T., Lele, S. R., Keim, J. L., & Boyce, M. S. (2017). Relative Selection Strength: Quantifying effect size in habitat‐ and step‐selection inference. *Ecology and Evolution* 7(14): 5322–5330. https://doi.org/10.1002/ece3.3122
