@@ -12,6 +12,8 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+This document is generated via R Markdown. Please feel free to view the corresponding GitHub repository: https://github.com/bsmity13/log_rss/.
+
 # Background
 
 Relative Selection Strength (RSS) allows for standardized comparison of effect sizes for exponential habitat selection analyses. This idea is presented in detail in Avgar et al. (2017), along with several specific cases where a simplified expression for log-RSS is presented.
